@@ -28,6 +28,8 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Divider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -56,23 +58,25 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.volumify.data.AppPreferences
 import com.example.volumify.service.FloatingVolumeService
+import kotlin.math.roundToInt
 
 @Composable
 fun MainScreen() {
     val context = LocalContext.current
     var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     var isServiceRunning by remember { mutableStateOf(FloatingVolumeService.isRunning) }
+    var orbitInterval by remember { mutableStateOf(AppPreferences.getOrbitIntervalDp(context).toFloat()) }
 
-
-
-    // Re-check permission when returning to app
+    // Re-check permission and preferences when returning to app
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 hasOverlayPermission = Settings.canDrawOverlays(context)
                 isServiceRunning = FloatingVolumeService.isRunning
+                orbitInterval = AppPreferences.getOrbitIntervalDp(context).toFloat()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -247,7 +251,90 @@ fun MainScreen() {
                 }
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // Arc Expansion & Spacing Settings Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B))
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "ARC LAYOUT & SPACING",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                letterSpacing = 1.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF38BDF8)
+                            )
+                        )
+                        Text(
+                            text = "${orbitInterval.roundToInt()} dp",
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF38BDF8)
+                            )
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Text(
+                        text = "Screen Edge Semi-Circle (Side-Anchored)",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    )
+                    Text(
+                        text = "Arc Trajectory: 90° to -90° (Left edge) / 270° to 90° (Right edge). Adjust the distance between the main button and expanded buttons.",
+                        style = MaterialTheme.typography.bodySmall.copy(color = Color(0xFF94A3B8))
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Slider(
+                        value = orbitInterval,
+                        onValueChange = { newValue ->
+                            orbitInterval = newValue
+                            AppPreferences.setOrbitIntervalDp(context, newValue.roundToInt())
+                        },
+                        valueRange = AppPreferences.MIN_ORBIT_INTERVAL_DP.toFloat()..AppPreferences.MAX_ORBIT_INTERVAL_DP.toFloat(),
+                        steps = (AppPreferences.MAX_ORBIT_INTERVAL_DP - AppPreferences.MIN_ORBIT_INTERVAL_DP - 1),
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFF38BDF8),
+                            activeTrackColor = Color(0xFF0284C7),
+                            inactiveTrackColor = Color(0xFF334155)
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Compact (${AppPreferences.MIN_ORBIT_INTERVAL_DP}dp)",
+                            style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFF64748B))
+                        )
+                        Text(
+                            text = "Default (${AppPreferences.DEFAULT_ORBIT_INTERVAL_DP}dp)",
+                            style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFF64748B))
+                        )
+                        Text(
+                            text = "Spacious (${AppPreferences.MAX_ORBIT_INTERVAL_DP}dp)",
+                            style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFF64748B))
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
 
             // Features & Gesture Guide
             Card(
@@ -267,10 +354,10 @@ fun MainScreen() {
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    GestureGuideItem(title = "👆 Tap Pattern Button", description = "Expands or collapses the mini-dashboard containing all system audio streams.")
-                    GestureGuideItem(title = "💨 Flick / Fling", description = "Flick the button across the screen to throw it to the opposite side.")
-                    GestureGuideItem(title = "🧲 Smart Snap", description = "Automatically snaps and anchors to the nearest left or right screen edge.")
-                    GestureGuideItem(title = "🎨 Minimalist Pattern", description = "Abstract geometric pattern with zero text or standard volume icons.")
+                    GestureGuideItem(title = "⭕ 4 or 5 Circle Buttons", description = "Media, Ringtone, Notification, Alarm, plus center button for active app volume.")
+                    GestureGuideItem(title = "👆 Tap Circle Button", description = "Shows a vertical capsule/pill slider directly above the pressed button.")
+                    GestureGuideItem(title = "⏱️ Long-Press & Slide", description = "Hold any button and slide your finger up/down to adjust volume immediately.")
+                    GestureGuideItem(title = "🧲 Drag & Smart Snap", description = "Touch the hub plate to drag across the screen and snap to the nearest edge.")
                 }
             }
 

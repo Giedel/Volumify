@@ -10,42 +10,42 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.database.ContentObserver
+import android.content.SharedPreferences
+import android.content.pm.ServiceInfo
+import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.PixelFormat
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.media.AudioManager
+import android.media.session.MediaSessionManager
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
 import android.provider.Settings
+import android.util.DisplayMetrics
 import android.view.Gravity
-import android.view.MotionEvent
-import android.view.VelocityTracker
-import android.view.View
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
-import android.view.animation.OvershootInterpolator
 import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.ui.platform.ComposeView
-import android.content.pm.ServiceInfo
-import androidx.core.app.ServiceCompat
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
-import androidx.lifecycle.setViewTreeLifecycleOwner
-import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
-import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.example.volumify.MainActivity
+import com.example.volumify.data.AppPreferences
 import com.example.volumify.model.AudioStreamDefaults
 import com.example.volumify.model.AudioStreamInfo
-import com.example.volumify.ui.PatternButtonView
-import com.example.volumify.ui.FullScreenOverlayContainer
+import com.example.volumify.ui.CapsuleSliderOverlay
+import com.example.volumify.ui.FloatingHubListener
+import com.example.volumify.ui.FloatingHubView
+import com.example.volumify.ui.HubButtonType
 
 class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner, ViewModelStoreOwner {
 
@@ -54,29 +54,29 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
     }
 
     private val lifecycleRegistry = LifecycleRegistry(this)
-
-    override val lifecycle: Lifecycle
-        get() = lifecycleRegistry
+    override val lifecycle: Lifecycle get() = lifecycleRegistry
 
     private lateinit var windowManager: WindowManager
     private lateinit var audioManager: AudioManager
 
-    private var floatingButtonView: PatternButtonView? = null
+    private var floatingHubView: FloatingHubView? = null
     private var buttonLayoutParams: WindowManager.LayoutParams? = null
+    private var isDockedToRight = false
+    private var relativeYRatio = 0.4f
+    private var snapAnimator: ValueAnimator? = null
 
-    private var dashboardView: ComposeView? = null
-    private var dashboardLayoutParams: WindowManager.LayoutParams? = null
+    private var capsuleSliderOverlay: CapsuleSliderOverlay? = null
 
-    private var isDashboardExpanded = false
+    private var initialDragX = 0
+    private var initialDragY = 0
+    private var quickAdjustStreamType = AudioManager.STREAM_MUSIC
+    private var quickAdjustStartVolume = 0
 
     private val savedStateRegistryController = SavedStateRegistryController.create(this)
     private val store = ViewModelStore()
 
-    override val savedStateRegistry: SavedStateRegistry
-        get() = savedStateRegistryController.savedStateRegistry
-
-    override val viewModelStore: ViewModelStore
-        get() = store
+    override val savedStateRegistry: SavedStateRegistry get() = savedStateRegistryController.savedStateRegistry
+    override val viewModelStore: ViewModelStore get() = store
 
     private val audioStreams = mutableStateListOf<AudioStreamInfo>()
 
@@ -85,6 +85,25 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
             if (intent?.action == "android.media.VOLUME_CHANGED_ACTION") {
                 refreshAudioStreams()
             }
+        }
+    }
+
+    private fun getScreenSize(): Pair<Int, Int> {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = windowManager.currentWindowMetrics.bounds
+            Pair(bounds.width(), bounds.height())
+        } else {
+            val displayMetrics = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.getRealMetrics(displayMetrics)
+            Pair(displayMetrics.widthPixels, displayMetrics.heightPixels)
+        }
+    }
+
+    private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == AppPreferences.KEY_ORBIT_INTERVAL_DP) {
+            val newOrbit = AppPreferences.getOrbitIntervalDp(this)
+            floatingHubView?.orbitIntervalDp = newOrbit
         }
     }
 
@@ -98,11 +117,23 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
 
+        capsuleSliderOverlay = CapsuleSliderOverlay(
+            context = this,
+            windowManager = windowManager,
+            onVolumeChanged = { streamType, newVal ->
+                adjustVolume(streamType, newVal)
+            },
+            onMuteToggled = { streamType, isMuted ->
+                toggleMute(streamType, isMuted)
+            }
+        )
+
         startForegroundServiceWithNotification()
         refreshAudioStreams()
         setupFloatingButton()
 
-        // Register broadcast receiver for system-wide volume key / app volume changes
+        AppPreferences.getSharedPreferences(this).registerOnSharedPreferenceChangeListener(prefListener)
+
         try {
             val filter = IntentFilter("android.media.VOLUME_CHANGED_ACTION")
             registerReceiver(volumeReceiver, filter)
@@ -180,321 +211,392 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
         audioStreams.addAll(updated)
     }
 
-    private fun setupFloatingButton() {
-        if (!Settings.canDrawOverlays(this)) {
-            return
+    private fun updateActiveAppStatus() {
+        try {
+            var appName: String? = null
+            var appIcon: Bitmap? = null
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val mediaSessionManager = getSystemService(Context.MEDIA_SESSION_SERVICE) as? MediaSessionManager
+                val pkgName = mediaSessionManager?.mediaKeyEventSessionPackageName
+                if (!pkgName.isNullOrEmpty() && pkgName != packageName) {
+                    val pm = packageManager
+                    val appInfo = pm.getApplicationInfo(pkgName, 0)
+                    appName = pm.getApplicationLabel(appInfo).toString()
+                    val drawable = pm.getApplicationIcon(appInfo)
+                    appIcon = drawableToBitmap(drawable)
+                }
+            }
+
+            if (appName == null && audioManager.isMusicActive) {
+                appName = "Active Media"
+            }
+
+            val hasActive = (appName != null)
+            floatingHubView?.hasActiveApp = hasActive
+            floatingHubView?.activeAppName = appName ?: "App"
+            floatingHubView?.activeAppIcon = appIcon
+        } catch (e: Throwable) {
+            e.printStackTrace()
         }
+    }
+
+    private fun drawableToBitmap(drawable: Drawable): Bitmap {
+        if (drawable is BitmapDrawable) return drawable.bitmap
+        val width = drawable.intrinsicWidth.takeIf { it > 0 } ?: (40 * resources.displayMetrics.density).toInt()
+        val height = drawable.intrinsicHeight.takeIf { it > 0 } ?: (40 * resources.displayMetrics.density).toInt()
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        drawable.setBounds(0, 0, canvas.width, canvas.height)
+        drawable.draw(canvas)
+        return bitmap
+    }
+
+    private fun getStreamInfoForButton(buttonType: HubButtonType): AudioStreamInfo? {
+        refreshAudioStreams()
+        return when (buttonType) {
+            HubButtonType.MEDIA -> audioStreams.find { it.streamType == AudioManager.STREAM_MUSIC }
+            HubButtonType.RINGTONE -> audioStreams.find { it.streamType == AudioManager.STREAM_RING }
+            HubButtonType.NOTIFICATION -> audioStreams.find { it.streamType == AudioManager.STREAM_NOTIFICATION }
+            HubButtonType.ALARM -> audioStreams.find { it.streamType == AudioManager.STREAM_ALARM }
+            HubButtonType.ACTIVE_APP -> {
+                val base = audioStreams.find { it.streamType == AudioManager.STREAM_MUSIC }
+                base?.copy(name = floatingHubView?.activeAppName ?: "Active App")
+            }
+        }
+    }
+
+    private fun setupFloatingButton() {
+        if (!Settings.canDrawOverlays(this)) return
 
         try {
-            val buttonSize = (45 * resources.displayMetrics.density).toInt()
+            val compactSize = (48 * resources.displayMetrics.density).toInt()
+            val screenSize = getScreenSize()
+            val screenHeight = screenSize.second
+            val padding = 20
+
+            val initialX = padding
+            val minY = padding
+            val maxY = (screenHeight - compactSize - padding).coerceAtLeast(minY)
+            val availableY = (maxY - minY).coerceAtLeast(1)
+            val initialY = (minY + relativeYRatio * availableY).toInt().coerceIn(minY, maxY)
 
             buttonLayoutParams = WindowManager.LayoutParams(
-                buttonSize,
-                buttonSize,
+                compactSize,
+                compactSize,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
-                x = 20
-                y = (resources.displayMetrics.heightPixels * 0.4).toInt()
+                x = initialX
+                y = initialY
             }
 
-            floatingButtonView = PatternButtonView(this).apply {
-                setOnTouchListener(FloatingButtonTouchListener())
+            val orbitDp = AppPreferences.getOrbitIntervalDp(this)
+            floatingHubView = FloatingHubView(this).apply {
+                orbitIntervalDp = orbitDp
+                this.isDockedToRight = this@FloatingVolumeService.isDockedToRight
+                listener = hubListener
             }
 
-            windowManager.addView(floatingButtonView, buttonLayoutParams)
+            updateActiveAppStatus()
+            windowManager.addView(floatingHubView, buttonLayoutParams)
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
-    private inner class FloatingButtonTouchListener : View.OnTouchListener {
-        private var initialX = 0
-        private var initialY = 0
-        private var initialTouchX = 0f
-        private var initialTouchY = 0f
-        private var touchStartTime = 0L
-        private var velocityTracker: VelocityTracker? = null
+    private val hubListener = object : FloatingHubListener {
+        override fun onToggleExpandRequested() {
+            expandMenu()
+        }
 
-        override fun onTouch(v: View, event: MotionEvent): Boolean {
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    v.animate()
-                        .scaleX(0.85f)
-                        .scaleY(0.85f)
-                        .setDuration(120)
-                        .setInterpolator(DecelerateInterpolator())
-                        .start()
+        override fun onCollapseRequested() {
+            collapseMenu()
+        }
 
-                    initialX = buttonLayoutParams?.x ?: 0
-                    initialY = buttonLayoutParams?.y ?: 0
-                    initialTouchX = event.rawX
-                    initialTouchY = event.rawY
-                    touchStartTime = System.currentTimeMillis()
+        override fun onButtonClicked(buttonType: HubButtonType, buttonScreenX: Int, buttonScreenY: Int) {
+            updateActiveAppStatus()
+            val stream = getStreamInfoForButton(buttonType) ?: return
+            capsuleSliderOverlay?.show(stream, buttonScreenX, buttonScreenY, isLongPress = false)
+        }
 
-                    velocityTracker?.clear()
-                    velocityTracker = VelocityTracker.obtain()
-                    velocityTracker?.addMovement(event)
-                    return true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    velocityTracker?.addMovement(event)
-                    val dx = (event.rawX - initialTouchX).toInt()
-                    val dy = (event.rawY - initialTouchY).toInt()
+        override fun onQuickAdjustStart(buttonType: HubButtonType, buttonScreenX: Int, buttonScreenY: Int) {
+            updateActiveAppStatus()
+            val stream = getStreamInfoForButton(buttonType) ?: return
+            quickAdjustStreamType = stream.streamType
+            quickAdjustStartVolume = stream.currentVolume
+            capsuleSliderOverlay?.show(stream, buttonScreenX, buttonScreenY, isLongPress = true)
+        }
 
-                    buttonLayoutParams?.let { params ->
-                        params.x = initialX + dx
-                        params.y = initialY + dy
-                        windowManager.updateViewLayout(floatingButtonView, params)
-                    }
-                    return true
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    v.animate()
-                        .scaleX(1.0f)
-                        .scaleY(1.0f)
-                        .setDuration(250)
-                        .setInterpolator(OvershootInterpolator(2.2f))
-                        .start()
-
-                    velocityTracker?.addMovement(event)
-                    velocityTracker?.computeCurrentVelocity(1000)
-
-                    val xVelocity = velocityTracker?.xVelocity ?: 0f
-                    val touchDuration = System.currentTimeMillis() - touchStartTime
-                    val totalDx = Math.abs(event.rawX - initialTouchX)
-                    val totalDy = Math.abs(event.rawY - initialTouchY)
-
-                    // Check for click/tap
-                    if (totalDx < 15 && totalDy < 15 && touchDuration < 250) {
-                        toggleDashboard()
-                    } else {
-                        // Snap or Fling to screen side
-                        snapOrFlingToSide(xVelocity)
-                    }
-
-                    velocityTracker?.recycle()
-                    velocityTracker = null
-                    return true
-                }
+        override fun onQuickAdjustMove(buttonType: HubButtonType, deltaY: Float) {
+            val stream = audioStreams.find { it.streamType == quickAdjustStreamType } ?: return
+            val stepPx = 18f * resources.displayMetrics.density
+            val deltaSteps = (deltaY / stepPx).toInt()
+            val targetVolume = (quickAdjustStartVolume + deltaSteps).coerceIn(0, stream.maxVolume)
+            if (targetVolume != stream.currentVolume) {
+                adjustVolume(quickAdjustStreamType, targetVolume)
+                capsuleSliderOverlay?.updateVolume(targetVolume, targetVolume == 0)
             }
-            return false
-        }
-    }
-
-    private fun snapOrFlingToSide(xVelocity: Float) {
-        val params = buttonLayoutParams ?: return
-        val screenWidth = resources.displayMetrics.widthPixels
-        val buttonWidth = floatingButtonView?.width ?: 150
-        val padding = 20
-
-        val targetX: Int = when {
-            xVelocity > 1000f -> screenWidth - buttonWidth - padding // Flicked right
-            xVelocity < -1000f -> padding                           // Flicked left
-            params.x + (buttonWidth / 2) > screenWidth / 2 -> screenWidth - buttonWidth - padding // Dragged past middle
-            else -> padding
         }
 
-        val startX = params.x
-        val animator = ValueAnimator.ofInt(startX, targetX).apply {
-            duration = 250
-            interpolator = DecelerateInterpolator()
-            addUpdateListener { animation ->
-                params.x = animation.animatedValue as Int
+        override fun onQuickAdjustEnd(buttonType: HubButtonType) {
+            capsuleSliderOverlay?.dismiss()
+        }
+
+        override fun onHubDragStart() {
+            snapAnimator?.cancel()
+            snapAnimator = null
+            initialDragX = buttonLayoutParams?.x ?: 0
+            initialDragY = buttonLayoutParams?.y ?: 0
+        }
+
+        override fun onHubDrag(dx: Int, dy: Int) {
+            buttonLayoutParams?.let { params ->
+                val screenSize = getScreenSize()
+                val screenWidth = screenSize.first
+                val screenHeight = screenSize.second
+                val buttonWidth = floatingHubView?.width?.takeIf { it > 0 } ?: params.width
+                val buttonHeight = floatingHubView?.height?.takeIf { it > 0 } ?: params.height
+
+                params.x = (initialDragX + dx).coerceIn(0, screenWidth - buttonWidth)
+                params.y = (initialDragY + dy).coerceIn(0, screenHeight - buttonHeight)
                 try {
-                    windowManager.updateViewLayout(floatingButtonView, params)
+                    windowManager.updateViewLayout(floatingHubView, params)
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
             }
         }
-        animator.start()
+
+        override fun onHubDragEnd(xVelocity: Float) {
+            snapOrFlingToSide(xVelocity)
+        }
     }
 
-    private fun toggleDashboard() {
-        if (isDashboardExpanded) {
-            collapseDashboard()
+    private fun expandMenu() {
+        val params = buttonLayoutParams ?: return
+        val hubView = floatingHubView ?: return
+        if (hubView.isExpanded) return
+
+        snapAnimator?.cancel()
+        snapAnimator = null
+
+        updateActiveAppStatus()
+
+        val screenSize = getScreenSize()
+        val screenWidth = screenSize.first
+        val screenHeight = screenSize.second
+        val padding = 20
+
+        val anchorCenterY = params.y + params.height / 2
+        val expandedW = hubView.getExpandedWidth()
+        val expandedH = hubView.getExpandedHeight()
+
+        hubView.isDockedToRight = isDockedToRight
+
+        val newX = if (isDockedToRight) {
+            (screenWidth - expandedW - padding).coerceAtLeast(0)
         } else {
-            expandDashboard()
-        }
-    }
-
-    private var overlayLifecycleOwner: OverlayViewLifecycleOwner? = null
-
-    private class OverlayViewLifecycleOwner : LifecycleOwner, SavedStateRegistryOwner, ViewModelStoreOwner {
-        private val lifecycleRegistry = LifecycleRegistry(this)
-        private val store = ViewModelStore()
-        private val savedStateRegistryController = SavedStateRegistryController.create(this)
-
-        init {
-            savedStateRegistryController.performAttach()
-            savedStateRegistryController.performRestore(null)
-            lifecycleRegistry.currentState = Lifecycle.State.INITIALIZED
+            padding
         }
 
-        fun handleLifecycleEvent(event: Lifecycle.Event) {
-            lifecycleRegistry.handleLifecycleEvent(event)
-        }
+        val minY = padding
+        val maxY = (screenHeight - expandedH - padding).coerceAtLeast(minY)
+        val newY = (anchorCenterY - expandedH / 2).coerceIn(minY, maxY)
 
-        override val lifecycle: Lifecycle
-            get() = lifecycleRegistry
-
-        override val savedStateRegistry: SavedStateRegistry
-            get() = savedStateRegistryController.savedStateRegistry
-
-        override val viewModelStore: ViewModelStore
-            get() = store
-    }
-
-    private fun expandDashboard() {
-        if (isDashboardExpanded) return
-
-        refreshAudioStreams()
-
-        // Smooth shrink & fade out transition for floating pattern button
-        floatingButtonView?.animate()
-            ?.scaleX(0.15f)
-            ?.scaleY(0.15f)
-            ?.alpha(0f)
-            ?.setDuration(160)
-            ?.setInterpolator(DecelerateInterpolator())
-            ?.withEndAction {
-                floatingButtonView?.visibility = View.INVISIBLE
-            }
-            ?.start()
-
-        val buttonX = buttonLayoutParams?.x ?: 20
-        val buttonY = buttonLayoutParams?.y ?: (resources.displayMetrics.heightPixels * 0.4).toInt()
-
-        val cardWidthPx = (230 * resources.displayMetrics.density).toInt()
-        val screenWidth = resources.displayMetrics.widthPixels
-        val screenHeight = resources.displayMetrics.heightPixels
-
-        val initX = if (buttonX > screenWidth / 2) {
-            (buttonX - cardWidthPx + 40).coerceAtLeast(10).toFloat()
-        } else {
-            (buttonX + 10).coerceAtMost(screenWidth - cardWidthPx - 10).toFloat()
-        }
-        val initY = (buttonY - 20).coerceIn(20, (screenHeight - 300).coerceAtLeast(20)).toFloat()
-
-        dashboardLayoutParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT
-        )
-
-        val owner = OverlayViewLifecycleOwner().apply {
-            handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
-            handleLifecycleEvent(Lifecycle.Event.ON_START)
-            handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
-        }
-        overlayLifecycleOwner = owner
-
-        dashboardView = ComposeView(this).apply {
-            setViewTreeLifecycleOwner(owner)
-            setViewTreeSavedStateRegistryOwner(owner)
-            setViewTreeViewModelStoreOwner(owner)
-
-            setContent {
-                FullScreenOverlayContainer(
-                    streams = audioStreams,
-                    initialOffsetX = initX,
-                    initialOffsetY = initY,
-                    onVolumeChanged = { streamType, newValue ->
-                        try {
-                            val current = audioManager.getStreamVolume(streamType)
-                            val diff = newValue - current
-                            if (diff > 0) {
-                                repeat(diff) {
-                                    audioManager.adjustStreamVolume(streamType, AudioManager.ADJUST_RAISE, 0)
-                                }
-                            } else if (diff < 0) {
-                                repeat(Math.abs(diff)) {
-                                    audioManager.adjustStreamVolume(streamType, AudioManager.ADJUST_LOWER, 0)
-                                }
-                            }
-                            audioManager.setStreamVolume(streamType, newValue, 0)
-
-                            audioStreams.find { it.streamType == streamType }?.let { item ->
-                                item.currentVolume = newValue
-                                item.isMuted = (newValue == 0)
-                            }
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                        }
-                    },
-                    onMuteToggled = { streamType, isMuted ->
-                        try {
-                            if (isMuted) {
-                                audioManager.setStreamVolume(streamType, 0, 0)
-                                try {
-                                    audioManager.adjustStreamVolume(streamType, AudioManager.ADJUST_MUTE, 0)
-                                } catch (t: Throwable) {}
-                                audioStreams.find { it.streamType == streamType }?.let { item ->
-                                    item.currentVolume = 0
-                                    item.isMuted = true
-                                }
-                            } else {
-                                val max = audioManager.getStreamMaxVolume(streamType)
-                                val half = (max / 2).coerceAtLeast(1)
-                                try {
-                                    audioManager.adjustStreamVolume(streamType, AudioManager.ADJUST_UNMUTE, 0)
-                                } catch (t: Throwable) {}
-                                audioManager.setStreamVolume(streamType, half, 0)
-                                audioStreams.find { it.streamType == streamType }?.let { item ->
-                                    item.currentVolume = half
-                                    item.isMuted = false
-                                }
-                            }
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                        }
-                    },
-                    onDismissed = { collapseDashboard() }
-                )
-            }
-        }
+        params.width = expandedW
+        params.height = expandedH
+        params.x = newX
+        params.y = newY
 
         try {
-            windowManager.addView(dashboardView, dashboardLayoutParams)
-            isDashboardExpanded = true
+            windowManager.updateViewLayout(hubView, params)
+            hubView.animateExpand()
         } catch (e: Exception) {
             e.printStackTrace()
-            floatingButtonView?.visibility = View.VISIBLE
         }
     }
 
-    private fun collapseDashboard() {
-        if (!isDashboardExpanded) return
-        overlayLifecycleOwner?.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
-        overlayLifecycleOwner = null
-        dashboardView?.let { view ->
+    private fun collapseMenu() {
+        val params = buttonLayoutParams ?: return
+        val hubView = floatingHubView ?: return
+        if (!hubView.isExpanded) return
+
+        capsuleSliderOverlay?.dismiss()
+
+        hubView.animateCollapse {
+            val compactSize = hubView.compactSize
+            val screenSize = getScreenSize()
+            val screenWidth = screenSize.first
+            val screenHeight = screenSize.second
+            val padding = 20
+
+            val anchorCenterY = params.y + params.height / 2
+            val minY = padding
+            val maxY = (screenHeight - compactSize - padding).coerceAtLeast(minY)
+            val targetY = (anchorCenterY - compactSize / 2).coerceIn(minY, maxY)
+
+            val targetX = if (isDockedToRight) {
+                screenWidth - compactSize - padding
+            } else {
+                padding
+            }
+
+            params.width = compactSize
+            params.height = compactSize
+            params.x = targetX
+            params.y = targetY
+
             try {
-                windowManager.removeView(view)
+                windowManager.updateViewLayout(hubView, params)
             } catch (e: Exception) {
                 e.printStackTrace()
             }
-        }
-        dashboardView = null
-        isDashboardExpanded = false
 
-        // Smooth spring scale in & fade in transition for floating pattern button
-        floatingButtonView?.apply {
-            visibility = View.VISIBLE
-            scaleX = 0.15f
-            scaleY = 0.15f
-            alpha = 0f
-            animate()
-                .scaleX(1.0f)
-                .scaleY(1.0f)
-                .alpha(1.0f)
-                .setDuration(220)
-                .setInterpolator(OvershootInterpolator(2.0f))
-                .start()
+            val availableY = (maxY - minY).coerceAtLeast(1)
+            relativeYRatio = ((targetY - minY).toFloat() / availableY).coerceIn(0f, 1f)
+        }
+    }
+
+    private fun adjustVolume(streamType: Int, newValue: Int) {
+        try {
+            audioManager.setStreamVolume(streamType, newValue, 0)
+            audioStreams.find { it.streamType == streamType }?.let { item ->
+                item.currentVolume = newValue
+                item.isMuted = (newValue == 0)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun toggleMute(streamType: Int, isMuted: Boolean) {
+        try {
+            if (isMuted) {
+                audioManager.setStreamVolume(streamType, 0, 0)
+                try {
+                    audioManager.adjustStreamVolume(streamType, AudioManager.ADJUST_MUTE, 0)
+                } catch (t: Throwable) {}
+                audioStreams.find { it.streamType == streamType }?.let { item ->
+                    item.currentVolume = 0
+                    item.isMuted = true
+                }
+                capsuleSliderOverlay?.updateVolume(0, true)
+            } else {
+                val max = audioManager.getStreamMaxVolume(streamType)
+                val half = (max / 2).coerceAtLeast(1)
+                try {
+                    audioManager.adjustStreamVolume(streamType, AudioManager.ADJUST_UNMUTE, 0)
+                } catch (t: Throwable) {}
+                audioManager.setStreamVolume(streamType, half, 0)
+                audioStreams.find { it.streamType == streamType }?.let { item ->
+                    item.currentVolume = half
+                    item.isMuted = false
+                }
+                capsuleSliderOverlay?.updateVolume(half, false)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun snapOrFlingToSide(xVelocity: Float) {
+        val params = buttonLayoutParams ?: return
+        val screenSize = getScreenSize()
+        val screenWidth = screenSize.first
+        val screenHeight = screenSize.second
+        val buttonWidth = floatingHubView?.width?.takeIf { it > 0 } ?: params.width
+        val buttonHeight = floatingHubView?.height?.takeIf { it > 0 } ?: params.height
+        val padding = 20
+
+        val snapToRight: Boolean = when {
+            xVelocity > 1000f -> true // Flicked right
+            xVelocity < -1000f -> false // Flicked left
+            params.x + (buttonWidth / 2) > screenWidth / 2 -> true // Dragged past middle
+            else -> false
+        }
+
+        isDockedToRight = snapToRight
+        floatingHubView?.isDockedToRight = snapToRight
+        val targetX: Int = if (snapToRight) screenWidth - buttonWidth - padding else padding
+
+        val minY = padding
+        val maxY = (screenHeight - buttonHeight - padding).coerceAtLeast(minY)
+        val clampedY = params.y.coerceIn(minY, maxY)
+        params.y = clampedY
+
+        val availableY = (maxY - minY).coerceAtLeast(1)
+        relativeYRatio = ((clampedY - minY).toFloat() / availableY).coerceIn(0f, 1f)
+
+        snapAnimator?.cancel()
+        val startX = params.x
+        snapAnimator = ValueAnimator.ofInt(startX, targetX).apply {
+            duration = 250
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animation ->
+                params.x = animation.animatedValue as Int
+                try {
+                    windowManager.updateViewLayout(floatingHubView, params)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+        snapAnimator?.start()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        capsuleSliderOverlay?.dismiss()
+        val hubView = floatingHubView ?: return
+        val params = buttonLayoutParams ?: return
+
+        hubView.collapseImmediately()
+        params.width = hubView.compactSize
+        params.height = hubView.compactSize
+
+        hubView.post {
+            updateFloatingButtonPositionOnOrientationChange()
+        }
+    }
+
+    private fun updateFloatingButtonPositionOnOrientationChange() {
+        val params = buttonLayoutParams ?: return
+        val hubView = floatingHubView ?: return
+        if (hubView.windowToken == null) return
+
+        snapAnimator?.cancel()
+        snapAnimator = null
+
+        val screenSize = getScreenSize()
+        val screenWidth = screenSize.first
+        val screenHeight = screenSize.second
+        val buttonWidth = hubView.width.takeIf { it > 0 } ?: params.width
+        val buttonHeight = hubView.height.takeIf { it > 0 } ?: params.height
+        val padding = 20
+
+        hubView.isDockedToRight = isDockedToRight
+
+        val targetX = if (isDockedToRight) {
+            screenWidth - buttonWidth - padding
+        } else {
+            padding
+        }
+
+        val minY = padding
+        val maxY = (screenHeight - buttonHeight - padding).coerceAtLeast(minY)
+        val availableY = (maxY - minY).coerceAtLeast(1)
+        val targetY = (minY + relativeYRatio * availableY).toInt().coerceIn(minY, maxY)
+
+        params.x = targetX
+        params.y = targetY
+
+        try {
+            windowManager.updateViewLayout(hubView, params)
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
@@ -502,13 +604,22 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
         super.onDestroy()
         isRunning = false
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
-        collapseDashboard()
-        floatingButtonView?.let {
+        snapAnimator?.cancel()
+        snapAnimator = null
+        capsuleSliderOverlay?.dismiss()
+        capsuleSliderOverlay = null
+        floatingHubView?.let {
             try {
                 windowManager.removeView(it)
             } catch (e: Exception) {
                 e.printStackTrace()
             }
+        }
+        floatingHubView = null
+        try {
+            AppPreferences.getSharedPreferences(this).unregisterOnSharedPreferenceChangeListener(prefListener)
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
         try {
             unregisterReceiver(volumeReceiver)
