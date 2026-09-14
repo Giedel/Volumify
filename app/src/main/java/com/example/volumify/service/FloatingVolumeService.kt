@@ -411,8 +411,8 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
         params.y = newY
 
         try {
-            windowManager.updateViewLayout(hubView, params)
             hubView.animateExpand()
+            windowManager.updateViewLayout(hubView, params)
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -450,6 +450,7 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
 
             try {
                 windowManager.updateViewLayout(hubView, params)
+                hubView.collapseImmediately()
             } catch (e: Exception) {
                 e.printStackTrace()
             }

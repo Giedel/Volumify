@@ -222,9 +222,7 @@ class FloatingHubView(context: Context) : View(context) {
         val finishAction = {
             if (!finished) {
                 finished = true
-                isExpanded = false
                 expandProgress = 0.0f
-                requestLayout()
                 invalidate()
                 onComplete()
             }
