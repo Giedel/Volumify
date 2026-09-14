@@ -415,6 +415,7 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
             windowManager.updateViewLayout(hubView, params)
         } catch (e: Exception) {
             e.printStackTrace()
+            hubView.collapseImmediately()
         }
     }
 
@@ -450,9 +451,10 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
 
             try {
                 windowManager.updateViewLayout(hubView, params)
-                hubView.collapseImmediately()
             } catch (e: Exception) {
                 e.printStackTrace()
+            } finally {
+                hubView.collapseImmediately()
             }
 
             val availableY = (maxY - minY).coerceAtLeast(1)
