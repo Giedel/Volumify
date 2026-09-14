@@ -337,7 +337,6 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
             val targetVolume = (quickAdjustStartVolume + deltaSteps).coerceIn(0, stream.maxVolume)
             if (targetVolume != stream.currentVolume) {
                 adjustVolume(quickAdjustStreamType, targetVolume)
-                capsuleSliderOverlay?.updateVolume(targetVolume, targetVolume == 0)
             }
         }
 
@@ -463,10 +462,13 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
     private fun adjustVolume(streamType: Int, newValue: Int) {
         try {
             audioManager.setStreamVolume(streamType, newValue, 0)
+            val actualVolume = audioManager.getStreamVolume(streamType)
+            val isMuted = actualVolume == 0
             audioStreams.find { it.streamType == streamType }?.let { item ->
-                item.currentVolume = newValue
-                item.isMuted = (newValue == 0)
+                item.currentVolume = actualVolume
+                item.isMuted = isMuted
             }
+            capsuleSliderOverlay?.updateVolume(actualVolume, isMuted)
         } catch (e: Exception) {
             e.printStackTrace()
         }
