@@ -25,6 +25,8 @@ import android.os.IBinder
 import android.provider.Settings
 import android.util.DisplayMetrics
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import androidx.compose.runtime.mutableStateListOf
@@ -61,6 +63,8 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
 
     private var floatingHubView: FloatingHubView? = null
     private var buttonLayoutParams: WindowManager.LayoutParams? = null
+    private var backgroundTouchBlockerView: View? = null
+    private var backgroundTouchLayoutParams: WindowManager.LayoutParams? = null
     private var isDockedToRight = false
     private var relativeYRatio = 0.4f
     private var snapAnimator: ValueAnimator? = null
@@ -104,7 +108,14 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
         if (key == AppPreferences.KEY_ORBIT_INTERVAL_DP) {
             val newOrbit = AppPreferences.getOrbitIntervalDp(this)
             floatingHubView?.orbitIntervalDp = newOrbit
+        } else if (key == AppPreferences.KEY_HUB_EDGE_OFFSET_DP) {
+            reapplyHubPositionForCurrentSize()
         }
+    }
+
+    private fun getEdgePaddingPx(): Int {
+        val density = resources.displayMetrics.density
+        return (AppPreferences.getHubEdgeOffsetDp(this) * density).toInt()
     }
 
     override fun onCreate() {
@@ -273,7 +284,7 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
             val compactSize = (48 * resources.displayMetrics.density).toInt()
             val screenSize = getScreenSize()
             val screenHeight = screenSize.second
-            val padding = 20
+            val padding = getEdgePaddingPx()
 
             val initialX = padding
             val minY = padding
@@ -301,7 +312,84 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
             }
 
             updateActiveAppStatus()
+            setupBackgroundTouchBlocker()
             windowManager.addView(floatingHubView, buttonLayoutParams)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun setupBackgroundTouchBlocker() {
+        if (backgroundTouchBlockerView != null) return
+        try {
+            backgroundTouchLayoutParams = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = 0
+                y = 0
+            }
+            backgroundTouchBlockerView = View(this).apply {
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                setOnTouchListener { _, event ->
+                    if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                        collapseMenu()
+                    }
+                    true
+                }
+            }
+            windowManager.addView(backgroundTouchBlockerView, backgroundTouchLayoutParams)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun setBackgroundTouchBlocking(enabled: Boolean) {
+        val blocker = backgroundTouchBlockerView ?: return
+        val params = backgroundTouchLayoutParams ?: return
+        val newFlags = if (enabled) {
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        } else {
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        }
+        if (params.flags == newFlags) return
+        params.flags = newFlags
+        try {
+            windowManager.updateViewLayout(blocker, params)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun reapplyHubPositionForCurrentSize() {
+        val params = buttonLayoutParams ?: return
+        val hubView = floatingHubView ?: return
+        val screenSize = getScreenSize()
+        val screenWidth = screenSize.first
+        val screenHeight = screenSize.second
+        val padding = getEdgePaddingPx()
+
+        val targetX = if (isDockedToRight) {
+            (screenWidth - params.width - padding).coerceAtLeast(0)
+        } else {
+            padding
+        }
+        val minY = padding
+        val maxY = (screenHeight - params.height - padding).coerceAtLeast(minY)
+        val clampedY = params.y.coerceIn(minY, maxY)
+
+        params.x = targetX
+        params.y = clampedY
+
+        val availableY = (maxY - minY).coerceAtLeast(1)
+        relativeYRatio = ((clampedY - minY).toFloat() / availableY).coerceIn(0f, 1f)
+
+        try {
+            windowManager.updateViewLayout(hubView, params)
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -387,7 +475,7 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
         val screenSize = getScreenSize()
         val screenWidth = screenSize.first
         val screenHeight = screenSize.second
-        val padding = 20
+        val padding = getEdgePaddingPx()
 
         val anchorCenterY = params.y + params.height / 2
         val expandedW = hubView.getExpandedWidth()
@@ -417,6 +505,7 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
         try {
             hubView.animateExpand()
             windowManager.updateViewLayout(hubView, params)
+            setBackgroundTouchBlocking(true)
         } catch (e: Exception) {
             e.printStackTrace()
             params.width = previousW
@@ -424,13 +513,17 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
             params.x = previousX
             params.y = previousY
             hubView.collapseImmediately()
+            setBackgroundTouchBlocking(false)
         }
     }
 
     private fun collapseMenu() {
         val params = buttonLayoutParams ?: return
         val hubView = floatingHubView ?: return
-        if (!hubView.isExpanded) return
+        if (!hubView.isExpanded) {
+            setBackgroundTouchBlocking(false)
+            return
+        }
 
         capsuleSliderOverlay?.dismiss()
 
@@ -439,7 +532,7 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
             val screenSize = getScreenSize()
             val screenWidth = screenSize.first
             val screenHeight = screenSize.second
-            val padding = 20
+            val padding = getEdgePaddingPx()
 
             val anchorCenterY = params.y + params.height / 2
             val minY = padding
@@ -463,6 +556,7 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
                 e.printStackTrace()
             } finally {
                 hubView.collapseImmediately()
+                setBackgroundTouchBlocking(false)
             }
 
             val availableY = (maxY - minY).coerceAtLeast(1)
@@ -526,7 +620,7 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
         val screenHeight = screenSize.second
         val buttonWidth = floatingHubView?.width?.takeIf { it > 0 } ?: params.width
         val buttonHeight = floatingHubView?.height?.takeIf { it > 0 } ?: params.height
-        val padding = 20
+        val padding = getEdgePaddingPx()
 
         val snapToRight: Boolean = when {
             xVelocity > 1000f -> true // Flicked right
@@ -567,6 +661,7 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         capsuleSliderOverlay?.dismiss()
+        setBackgroundTouchBlocking(false)
         val hubView = floatingHubView ?: return
         val params = buttonLayoutParams ?: return
 
@@ -592,7 +687,7 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
         val screenHeight = screenSize.second
         val buttonWidth = hubView.width.takeIf { it > 0 } ?: params.width
         val buttonHeight = hubView.height.takeIf { it > 0 } ?: params.height
-        val padding = 20
+        val padding = getEdgePaddingPx()
 
         hubView.isDockedToRight = isDockedToRight
 
@@ -625,6 +720,15 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
         snapAnimator = null
         capsuleSliderOverlay?.dismiss()
         capsuleSliderOverlay = null
+        backgroundTouchBlockerView?.let {
+            try {
+                windowManager.removeView(it)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        backgroundTouchBlockerView = null
+        backgroundTouchLayoutParams = null
         floatingHubView?.let {
             try {
                 windowManager.removeView(it)

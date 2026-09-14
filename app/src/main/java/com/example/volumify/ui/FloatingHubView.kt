@@ -104,17 +104,6 @@ class FloatingHubView(context: Context) : View(context) {
     }
 
     // Paints
-    private val backdropPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-        color = Color.parseColor("#CC0F172A") // 80% dark slate
-    }
-
-    private val backdropBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = 1.5f * density
-        color = Color.parseColor("#4038BDF8")
-    }
-
     private val buttonBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
         color = Color.parseColor("#181F30")
@@ -394,7 +383,7 @@ class FloatingHubView(context: Context) : View(context) {
                     } else {
                         // Tapped outside all buttons -> collapse
                         listener?.onCollapseRequested()
-                        return false
+                        return true
                     }
                 }
             }
@@ -504,27 +493,9 @@ class FloatingHubView(context: Context) : View(context) {
         val cx = anchor.first
         val cy = anchor.second
 
-        // 1. Draw expanded frosted semi-circle backdrop if expanding
+        // Draw surrounding volume buttons only (transparent background)
         if (expandProgress > 0.01f) {
-            val fanRadius = (orbitDistance + outerButtonRadius + extraPadding) * expandProgress
-            backdropPaint.alpha = (190 * expandProgress).toInt()
-            backdropBorderPaint.alpha = (90 * expandProgress).toInt()
-
-            val fanRect = RectF(cx - fanRadius, cy - fanRadius, cx + fanRadius, cy + fanRadius)
-            val startAngle = if (!isDockedToRight) -90f else 90f
-            val sweepAngle = 180f
-
-            canvas.drawArc(fanRect, startAngle, sweepAngle, true, backdropPaint)
-            canvas.drawArc(fanRect, startAngle, sweepAngle, false, backdropBorderPaint)
-
-            // Subtle track line along the button orbit
-            val trackRadius = orbitDistance * expandProgress
-            val trackRect = RectF(cx - trackRadius, cy - trackRadius, cx + trackRadius, cy + trackRadius)
-            val trackStart = if (!isDockedToRight) -76f else 104f
-            val trackSweep = 152f
-            canvas.drawArc(trackRect, trackStart, trackSweep, false, backdropBorderPaint)
-
-            // 2. Draw surrounding volume buttons
+            // Draw surrounding volume buttons
             drawSurroundingButton(canvas, HubButtonType.MEDIA, "#38BDF8", "#0284C7")
             drawSurroundingButton(canvas, HubButtonType.RINGTONE, "#10B981", "#059669")
             drawSurroundingButton(canvas, HubButtonType.ALARM, "#F59E0B", "#D97706")
@@ -535,7 +506,7 @@ class FloatingHubView(context: Context) : View(context) {
             }
         }
 
-        // 3. Draw Center Main Floating Button
+        // Draw Center Main Floating Button
         drawCenterMainButton(canvas, cx, cy)
     }
 
