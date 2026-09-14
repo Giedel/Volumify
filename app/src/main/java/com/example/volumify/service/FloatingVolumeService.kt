@@ -392,6 +392,10 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
         val anchorCenterY = params.y + params.height / 2
         val expandedW = hubView.getExpandedWidth()
         val expandedH = hubView.getExpandedHeight()
+        val previousW = params.width
+        val previousH = params.height
+        val previousX = params.x
+        val previousY = params.y
 
         hubView.isDockedToRight = isDockedToRight
 
@@ -415,6 +419,10 @@ class FloatingVolumeService : Service(), LifecycleOwner, SavedStateRegistryOwner
             windowManager.updateViewLayout(hubView, params)
         } catch (e: Exception) {
             e.printStackTrace()
+            params.width = previousW
+            params.height = previousH
+            params.x = previousX
+            params.y = previousY
             hubView.collapseImmediately()
         }
     }
