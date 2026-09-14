@@ -68,6 +68,7 @@ fun MainScreen() {
     var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     var isServiceRunning by remember { mutableStateOf(FloatingVolumeService.isRunning) }
     var orbitInterval by remember { mutableStateOf(AppPreferences.getOrbitIntervalDp(context).toFloat()) }
+    var hubEdgeOffset by remember { mutableStateOf(AppPreferences.getHubEdgeOffsetDp(context).toFloat()) }
 
     // Re-check permission and preferences when returning to app
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -77,6 +78,7 @@ fun MainScreen() {
                 hasOverlayPermission = Settings.canDrawOverlays(context)
                 isServiceRunning = FloatingVolumeService.isRunning
                 orbitInterval = AppPreferences.getOrbitIntervalDp(context).toFloat()
+                hubEdgeOffset = AppPreferences.getHubEdgeOffsetDp(context).toFloat()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -328,6 +330,77 @@ fun MainScreen() {
                         )
                         Text(
                             text = "Spacious (${AppPreferences.MAX_ORBIT_INTERVAL_DP}dp)",
+                            style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFF64748B))
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    Divider(color = Color(0xFF334155))
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "EDGE OFFSET",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                letterSpacing = 1.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF38BDF8)
+                            )
+                        )
+                        Text(
+                            text = "${hubEdgeOffset.roundToInt()} dp",
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF38BDF8)
+                            )
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Text(
+                        text = "Distance of the floating hub from the nearest screen edge.",
+                        style = MaterialTheme.typography.bodySmall.copy(color = Color(0xFF94A3B8))
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Slider(
+                        value = hubEdgeOffset,
+                        onValueChange = { newValue ->
+                            hubEdgeOffset = newValue
+                            AppPreferences.setHubEdgeOffsetDp(context, newValue.roundToInt())
+                        },
+                        valueRange = AppPreferences.MIN_HUB_EDGE_OFFSET_DP.toFloat()..AppPreferences.MAX_HUB_EDGE_OFFSET_DP.toFloat(),
+                        steps = (AppPreferences.MAX_HUB_EDGE_OFFSET_DP - AppPreferences.MIN_HUB_EDGE_OFFSET_DP - 1),
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFF38BDF8),
+                            activeTrackColor = Color(0xFF0284C7),
+                            inactiveTrackColor = Color(0xFF334155)
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Flush (${AppPreferences.MIN_HUB_EDGE_OFFSET_DP}dp)",
+                            style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFF64748B))
+                        )
+                        Text(
+                            text = "Default (${AppPreferences.DEFAULT_HUB_EDGE_OFFSET_DP}dp)",
+                            style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFF64748B))
+                        )
+                        Text(
+                            text = "Inset (${AppPreferences.MAX_HUB_EDGE_OFFSET_DP}dp)",
                             style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFF64748B))
                         )
                     }
